@@ -16,6 +16,7 @@ import re
 import sys
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + r"\..")
@@ -69,19 +70,19 @@ def build_quote_text(entries, rate_value, rate_display):
 
     Returns the exact copy-paste block the project quotes scripts with, e.g.:
 
-        【字數：
+        字數：
         健身教練：8250
         女大學生：8101
 
         總字數： 8250+8101=16351
 
-        總報價：16351*16/1000=262】
+        總報價：16351*16/1000=262
 
     Returns "" when there is nothing to quote.
     """
     if not entries:
         return ""
-    lines = ["【字數："]
+    lines = ["字數："]
     for label, n in entries:
         lines.append("%s：%d" % (label, n))
     lines.append("")
@@ -90,7 +91,7 @@ def build_quote_text(entries, rate_value, rate_display):
     lines.append("總字數： %s=%d " % (expr, total))
     lines.append("")
     quote = int(total * rate_value / 1000 + 0.5)  # 四捨五入
-    lines.append("總報價：%d*%s/1000=%d】" % (total, rate_display, quote))
+    lines.append("總報價：%d*%s/1000=%d" % (total, rate_display, quote))
     return "\n".join(lines)
 
 
@@ -123,10 +124,9 @@ class App(tk.Tk):
         total = ttk.Frame(self)
         total.pack(fill="x", **pad)
 
-        ttk.Label(total, text="總字數", font=("Microsoft JhengHei UI", 12)).pack(side="left")
+        ttk.Label(total, text="總字數").pack(side="left")
         self.total_var = tk.StringVar(value="—")
-        ttk.Label(total, textvariable=self.total_var,
-                  font=("Consolas", 28, "bold")).pack(side="left", padx=(12, 12))
+        ttk.Label(total, textvariable=self.total_var).pack(side="left", padx=(12, 12))
         self._add_button(total, "複製總字數", self._copy_total).pack(side="left")
         self._add_button(total, "複製整份表格", self._copy_table).pack(side="left", padx=(8, 0))
 
@@ -148,9 +148,6 @@ class App(tk.Tk):
 
         cols = [c[0] for c in COLUMNS]
         self.tree = ttk.Treeview(table_pane, columns=cols, show="headings", selectmode="extended")
-        style = ttk.Style(self)
-        style.configure("Treeview", font=("Consolas", 10))
-        style.configure("Treeview.Heading", font=("Consolas", 10, "bold"))
         for key, label, width in COLUMNS:
             anchor = "w" if key == "file" else "e"
             self.tree.heading(key, text=label)
@@ -160,24 +157,27 @@ class App(tk.Tk):
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
+        # "same font as everything else, just bold" - derive from the actual
+        # default rather than naming a family/size, so it never drifts from
+        # whatever plain system font the rest of the UI is using.
+        bold_font = tkfont.Font(**tkfont.nametofont("TkDefaultFont").actual())
+        bold_font.configure(weight="bold")
+        self._bold_font = bold_font
         self.tree.tag_configure("error", foreground="#B00020")
-        self.tree.tag_configure("total", font=("Consolas", 10, "bold"))
+        self.tree.tag_configure("total", font=bold_font)
         self.tree.bind("<Control-c>", self._copy_selection)
-
-        ttk.Label(table_pane, text="提示：表格內容可以直接選取範圍，按 Ctrl+C 複製。",
-                  foreground="#888").pack(side="bottom", anchor="w", pady=(4, 0))
 
         quote_pane = ttk.Frame(paned)
         paned.add(quote_pane, weight=2)
 
         qhead = ttk.Frame(quote_pane)
         qhead.pack(fill="x", pady=(0, 4))
-        ttk.Label(qhead, text="報價文字（計算完成後自動產生，可直接複製貼上）").pack(side="left")
+        ttk.Label(qhead, text="報價文字").pack(side="left")
         self._add_button(qhead, "複製", self._copy_quote).pack(side="right")
 
         qbody = ttk.Frame(quote_pane)
         qbody.pack(fill="both", expand=True)
-        self.quote_text = tk.Text(qbody, wrap="word", font=("Consolas", 11), state="disabled")
+        self.quote_text = tk.Text(qbody, wrap="word", state="disabled")
         qsb = ttk.Scrollbar(qbody, orient="vertical", command=self.quote_text.yview)
         self.quote_text.configure(yscrollcommand=qsb.set)
         self.quote_text.pack(side="left", fill="both", expand=True)
