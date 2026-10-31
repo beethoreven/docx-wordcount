@@ -13,8 +13,13 @@ WORDS ("字數")
     punctuation, ellipsis, / - _ | circled digits, roman numerals, emoji
   - en dash U+2013 and em dash U+2014 SEPARATE words and are worth 0 words
     (they do still count as characters)
-  - whitespace separates: SP, TAB, NBSP, U+3000; a <w:br/> separates but is
-    not a character at all
+  - whitespace separates: SP, TAB, NBSP, U+3000; a page or column break
+    separates but is not a character at all
+  - KNOWN, DELIBERATE DEVIATIONS: a manual line break (Shift+Enter) is
+    counted here as nothing, Word charges 1 with-spaces character; an
+    optional hyphen (Ctrl+-) is counted here, Word ignores it. Neither is
+    aligned on purpose - they are reported by find_hidden_marks() instead,
+    see the "Hidden marks" section below.
   - Unicode "ambiguous width" characters (·, “ ”, ①, Ⅰ …) switch sides
     depending on the run: East-Asian in a run hinted w:hint="eastAsia",
     Latin otherwise. En/em dash stay separators either way.
@@ -57,7 +62,7 @@ MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
 
 WHITESPACE = frozenset(chr(c) for c in (0x20, 0x09, 0xA0, 0x3000, 0x0A, 0x0D, 0x0B))  # SP TAB NBSP IDEO-SP LF CR VT
 REF_MARK = chr(0xE000)      # footnote/endnote mark: 1 character, 0 words
-SEP_NOCHAR = chr(0xE001)    # <w:br/>: separates words, counts as nothing
+SEP_NOCHAR = chr(0xE001)    # <w:br/>, <w:cr/>: separates words, counts as nothing (see "Hidden marks")
 # Measured: exactly these three are charged 1 character but 0 words and break a word run.
 ZERO_WORD_SEPARATORS = frozenset((chr(0x2013), chr(0x2014), chr(0x2022), REF_MARK))
 
@@ -485,6 +490,98 @@ def count_docx(path, include_boxes=False, include_notes=False, include_deleted=F
             for part in ("word/footnotes.xml", "word/endnotes.xml"):
                 tally(part, count_paras=False)
     return res
+
+
+# --------------------------------------------------------------------------
+# Hidden marks - report only, counting above is deliberately left as is
+# --------------------------------------------------------------------------
+#
+# Two marks were found shifting real scripts' counts away from Word's, and the
+# user chose to have them pointed out rather than counted: each is a mistake to
+# fix in the document itself, not something the count should paper over.
+#   - manual line break (Shift+Enter, <w:br/> without a type, <w:cr/>): Word
+#     charges it 1 with-spaces character; count_segments() charges 0.
+#   - optional hyphen (Ctrl+-, <w:softHyphen/>): Word ignores it entirely;
+#     count_segments() counts it as U+00AD, which an eastAsia-hinted run turns
+#     into a CJK character.
+# Page and column breaks are not reported: Word (in Word 2010 compatibility
+# mode) doesn't count them, and they are visible on screen anyway.
+#
+# When to align the count instead: if this starts being used on documents
+# where Shift+Enter / Ctrl+- are intentional rather than mistakes (someone
+# else's formatting conventions), count them the way Word does in
+# _paragraph_segments() - br/cr without a type as one whitespace character,
+# softHyphen as nothing - and keep this report as a separate option.
+
+MARK_LINE_BREAK = "手動換行"
+MARK_SOFT_HYPHEN = "選擇性連字號"
+
+# sentinel -> (kind, the glyph Word shows for it with editing marks on)
+_MARKS = {chr(0xE010): (MARK_LINE_BREAK, "↵"), chr(0xE011): (MARK_SOFT_HYPHEN, "¬")}
+
+
+def _paragraph_text_with_marks(p):
+    """Visible text of one <w:p>, each reportable mark replaced by its sentinel."""
+    out = []
+
+    def walk(node):
+        for child in _children(node):
+            tag = child.tag
+            if tag in (W + "txbxContent", W + "pPr", W + "rPr", W + "del", W + "moveFrom"):
+                continue
+            elif tag == W + "t":
+                out.append(child.text or "")
+            elif tag == W + "tab":
+                out.append(" ")
+            elif tag == W + "cr" or (tag == W + "br" and
+                                     child.get(W + "type") in (None, "textWrapping")):
+                out.append(chr(0xE010))
+            elif tag == W + "softHyphen":
+                out.append(chr(0xE011))
+            elif tag == W + "r":
+                if not _run_is_hidden(child):
+                    walk(child)
+            else:
+                walk(child)
+
+    walk(p)
+    return "".join(out)
+
+
+def _show_marks(text):
+    for sentinel, (_, glyph) in _MARKS.items():
+        text = text.replace(sentinel, glyph)
+    return text
+
+
+def find_hidden_marks(path, context=15):
+    """Manual line breaks and optional hyphens in the main story (body + tables).
+
+    Returns [(kind, paragraph_no, before, after), ...] in document order.
+    paragraph_no counts every main-story <w:p> from 1; before/after hold up to
+    `context` characters on each side, within the same paragraph, with any
+    other mark inside them shown as Word's editing-mark glyph. An empty
+    `after` means the mark ends the paragraph.
+    """
+    with zipfile.ZipFile(path) as z:
+        root = ET.fromstring(z.read("word/document.xml"))
+    found = []
+    for no, p in enumerate(_iter_paragraphs(root), 1):
+        text = _paragraph_text_with_marks(p)
+        for i, ch in enumerate(text):
+            if ch in _MARKS:
+                found.append((_MARKS[ch][0], no,
+                              _show_marks(text[max(0, i - context):i]),
+                              _show_marks(text[i + 1:i + 1 + context])))
+    return found
+
+
+def mark_glyph(kind):
+    """The editing-mark glyph Word displays for a reported mark kind."""
+    for k, glyph in _MARKS.values():
+        if k == kind:
+            return glyph
+    return "?"
 
 
 # --------------------------------------------------------------------------

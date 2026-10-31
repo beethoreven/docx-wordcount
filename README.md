@@ -2,7 +2,7 @@
 
 ## docx-wordcount — .docx 字數統計工具
 
-算 `.docx` 的字數／字元數／段落數，數字跟 Microsoft Word「校閱 → 字數統計」對話框**完全一樣**，但不需要開 Word。有零依賴的命令列版，也有單一 `.exe`、不需安裝不需網路的 Windows GUI 版。這份文件分成兩個獨立的部分，請依需求閱讀:
+算 `.docx` 的字數／字元數／段落數，數字跟 Microsoft Word「校閱 → 字數統計」對話框**完全一樣**（唯一刻意的例外是手動換行與選擇性連字號，工具會把它們列出來，見[已知限制](#已知限制)），但不需要開 Word。有零依賴的命令列版，也有單一 `.exe`、不需安裝不需網路的 Windows GUI 版。這份文件分成兩個獨立的部分，請依需求閱讀:
 
 - **[專案報告](#專案報告)**：為什麼要自己重新算、Word 的計數規則是怎麼量出來的、踩過哪些坑 —— 給想了解「這是什麼、為什麼長這樣」的人看。
 - **[架設 SOP](#架設-sop)**：怎麼跑命令列版、怎麼打包 GUI 版、怎麼交叉驗證 —— 給想「動手把它跑起來」的人看。
@@ -15,7 +15,7 @@
 
 ### 這是什麼
 
-劇本殺文本常按文本量報價，需要一次查好幾個檔案的字數。從 Word UI 一個一個開太慢；把 `.docx` 丟給 LLM 直接問字數則永遠是估的，不會對——LLM 沒有辦法真的逐字元跑 Word 內部那套分類邏輯，只能用猜的。這個工具把 Word 自己的字數統計演算法逆向工程出來，寫成一支零依賴的 Python 腳本，一份檔案約 0.02 秒，數字跟 Word 本人完全一致。
+劇本殺文本常按文本量報價，需要一次查好幾個檔案的字數。從 Word UI 一個一個開太慢；把 `.docx` 丟給 LLM 直接問字數則永遠是估的，不會對——LLM 沒有辦法真的逐字元跑 Word 內部那套分類邏輯，只能用猜的。這個工具把 Word 自己的字數統計演算法逆向工程出來，寫成一支零依賴的 Python 腳本，一份檔案約 0.02 秒，數字跟 Word 本人完全一致；文件裡如果藏有手動換行或選擇性連字號這兩種肉眼不易察覺的排版標記，則會把每一處標出來，讓使用者回文件修掉。
 
 ### 系統架構
 
@@ -59,6 +59,19 @@ Microsoft 沒有公開 `ComputeStatistics()` 的實作細節，網路上能找�
 
 這個工具的存在前提是「簡轉繁專案的配套工具，简体檔名是常態」，不能假設每台機器都剛好有那個環境變數。修法是在程式進入點明確 `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`，不繼承任何環境設定。這件事也記進了 `known-issue-check`（item 26）：任何依賴執行環境（locale、codepage、env var）決定行為的程式，在「自己這台機器測得過」和「別人的機器測得過」之間沒有必然關係，兩邊都要各自驗證，不能只驗其中一邊。
 
+### 手動換行與選擇性連字號：刻意不跟著 Word 算，改成標出來
+
+一個做過微排版（換字體、加頁首頁碼、插圖片）的資料夾裡，12 個檔案有 3 個跟 Word 差 1：白未染 A／B 的「含空白」各少 1，慕歸 A 的字數、字元、含空白、中文字元各多 1。字體、頁首頁碼、圖片都不是原因（頁首頁尾本來就不算，圖片沒有文字）。把整個資料夾掃一次，偏差數量剛好等於兩種標記的出現次數；用一份「照 Word 的算法處理這兩種標記」的實驗版重算，12 個檔案全部跟 Word 一致。
+
+- **手動換行**（Shift+Enter，Word 開編輯標記時顯示成 ↵，XML 是不帶 type 的 `<w:br/>` 或 `<w:cr/>`）：Word 算成 **1 個空白字元**，只進「含空白」，而且會斷字。程式原本的規則是「換行完全不算」，那條其實是從**分頁符號**量出來的，後來誤推廣到所有換行。分頁跟分欄符號 Word 確實不算，這部分是對的。
+- **選擇性連字號**（Ctrl+-，顯示成 ¬，XML 是 `<w:softHyphen/>`）：Word **完全不算**，也不斷字。程式把它當成 U+00AD 字元，而 U+00AD 是歧義寬度字元，在中文格式的 run 裡被算成 1 個中文字，所以四項統計各多 1。要注意的是，直接打在文字裡的 U+00AD 字元 Word 是會算的，跟這個元素不一樣。
+
+**決定：計算不改，改成標出來。** 在這批劇本裡，這兩種標記都是排版疏失——段落一律該用 Enter，選擇性連字號平常肉眼完全看不到——該修的是文件本身，不是讓字數去遷就它。所以 GUI 多一個區塊，逐一列出每一處的檔案、類型、第幾段、前後文（用 Word 自己的編輯標記符號 ↵、¬、¶ 標示位置），讓使用者回 Word 修掉。代價是：含這兩種標記的檔案，工具的數字會跟 Word 差那幾個字元，這是刻意的。偵測邏輯是獨立的 `find_hidden_marks()`，不碰計算函式，12 個檔案的計數結果在加上這個功能前後逐項相同。
+
+**什麼情況下要改回來對齊 Word：** 如果之後這個工具會用在「Shift+Enter／Ctrl+- 是刻意使用」的文件上（例如別人的排版習慣），就該照 Word 的算法調整 `_paragraph_segments()`（換行算 1 個空白、選擇性連字號不算），標出功能保留成選項。
+
+量測過程還順帶解開一個矛盾：自製測試檔裡的分頁符號被 Word 算成 1 個字元加 1 個字，但真實檔案裡不算。原因是測試檔沒有 `settings.xml`，Word 以 2007 相容模式開啟；真實檔案是 2010 相容模式。**自製測試檔的相容模式要跟真實檔案一致**，否則量到的規則可能只適用於測試檔。
+
 ### GUI 版經過使用者兩輪回饋才定案的三個設計
 
 GUI 版最早的版本，為了讓「總計 X 個檔案」那一列的粗體視覺上跟旁邊的大字體總字數一致，把 Consolas 套用到整個表格跟報價文字框。使用者的回饋很直接：Consolas 本身就不好辨識，而且越用越多範圍讓問題更明顯。最終版拿掉所有自訂字體家族（包含最初就存在、從未被指名批評、但顯然也是問題一部分的 `Consolas`／`Microsoft JhengHei UI`），全部改回系統預設字體；唯一保留的「總計」列粗體，改成用 `tkinter.font` 動態取當下的預設字型再疊加 `bold`，而不是另外指定一個字體名稱——確保之後不會再不小心引入第二種字體。
@@ -93,6 +106,7 @@ gui/
 - **`--include-notes` / `--include-boxes` 只驗證過一份合成測試檔**，沒有真實檔案覆蓋。
 - 隱藏文字只認直接格式的 `<w:vanish/>`，不解析樣式繼承來的隱藏。
 - 只支援 `.docx`／`.dotx` 這類 OOXML；舊的 `.doc` 二進位格式不支援。
+- **含手動換行或選擇性連字號的檔案，數字會跟 Word 不同（刻意的）**：每個手動換行讓「含空白」少 1；每個選擇性連字號讓字元多 1，落在中文格式文字裡時字數、中文字元也各多 1。GUI 會把每一處列出來，見上方「手動換行與選擇性連字號」。
 - GUI 版目前只有一次使用者親自點擊完整流程（選資料夾 → 算出結果 → 複製）並確認畫面正確的紀錄；後續每一輪修改都只驗證到純函式邏輯層級與封存檔內容層級，沒有再重複一次完整的互動流程。
 
 ---
@@ -140,6 +154,14 @@ python -m PyInstaller --onefile --windowed --clean --name ScriptWordCount --path
 
 輸出在 `gui/dist/ScriptWordCount.exe`，單一檔案、不需安裝、不需網路，可以直接複製到別台機器上用。build 產物（`build/`、`dist/`、`*.spec`）不進版控。
 
+### 3. 畫面
+
+選資料夾（算第一層的所有 `.docx`，不進子資料夾）或單一檔案之後，下方由上到下三個區塊，中間的分隔線可以拖曳調整高度：
+
+1. **字數表格**：每個檔案的字數、字元（不計／含空白）、中文字元、段落，最後一列是總計。可選取多列按 Ctrl+C 複製。
+2. **手動換行／選擇性連字號**：每一處的檔案、類型、第幾段、前後文，標題列顯示共幾處。前後文裡 ↵ 是手動換行、¬ 是選擇性連字號、¶ 表示該處在段落結尾；可以複製前後文到 Word 用 Ctrl+F 定位。在 Word 裡要一次找出所有選擇性連字號，可用「尋找及取代 → 更多 → 指定方式 → 選擇性連字號」（`^-`）。
+3. **報價文字**：依每個檔案的「字元（含空白）」自動產生，單價欄位改了會即時重算。
+
 ## Part C. 交叉驗證
 
 改動 `docx_wordcount.py` 的計數邏輯之後，一定要跑這個，不要只靠讀程式碼判斷對不對：
@@ -164,7 +186,7 @@ powershell -ExecutionPolicy Bypass -File verify_against_word.ps1 -Path "D:\劇�
 
 ## docx-wordcount — .docx Word Count Tool
 
-Counts the words, characters, and paragraphs in a `.docx` exactly the way Microsoft Word's "Review → Word Count" dialog reports them, without opening Word. Ships as a zero-dependency CLI and as a single-file, install-free, offline Windows GUI (`.exe`). This document is split into two independent parts:
+Counts the words, characters, and paragraphs in a `.docx` exactly the way Microsoft Word's "Review → Word Count" dialog reports them (the one deliberate exception being manual line breaks and optional hyphens, which the tool lists instead — see [Known Limitations](#known-limitations)), without opening Word. Ships as a zero-dependency CLI and as a single-file, install-free, offline Windows GUI (`.exe`). This document is split into two independent parts:
 
 - **[Project Report](#project-report)**: why this had to be built from scratch, how Word's counting rules were reverse-engineered, and what went wrong along the way — for anyone who wants to understand what this is and why it's built this way.
 - **[Setup Guide](#setup-guide)**: how to run the CLI, build the GUI, and cross-validate — for anyone who wants to get it running.
@@ -177,7 +199,7 @@ These two parts are kept deliberately separate; the report is background, the gu
 
 ### What This Is
 
-Script-murder-mystery scripts are commonly priced by text volume, which routinely means counting several files at once. Opening each one in Word is too slow; handing a `.docx` to an LLM and asking for its word count is always a guess, and never correct — an LLM has no way to actually run Word's internal character-by-character classification, only to estimate. This tool reverse-engineers Word's own word-count algorithm into a zero-dependency Python script — about 0.02 seconds per file, numbers that match Word exactly.
+Script-murder-mystery scripts are commonly priced by text volume, which routinely means counting several files at once. Opening each one in Word is too slow; handing a `.docx` to an LLM and asking for its word count is always a guess, and never correct — an LLM has no way to actually run Word's internal character-by-character classification, only to estimate. This tool reverse-engineers Word's own word-count algorithm into a zero-dependency Python script — about 0.02 seconds per file, numbers that match Word exactly; if a document hides either of two hard-to-spot formatting marks — manual line breaks or optional hyphens — every occurrence is pointed out so the document itself can be fixed.
 
 ### System Architecture
 
@@ -221,6 +243,19 @@ This tool's CLI prints filenames, and Windows consoles default to codepage cp950
 
 Given this tool exists specifically to support a Simplified-to-Traditional project, Simplified filenames are the normal case, not an edge case — nothing can assume every machine happens to carry that same environment variable. The fix is to explicitly `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` at the entry point, inheriting nothing from the ambient environment. This also became `known-issue-check` item 26: any program whose behavior depends on the ambient locale/codepage/env var carries no guarantee that "it works on my machine" says anything about whether it works on someone else's — both need to be verified independently, not just one.
 
+### Manual Line Breaks and Optional Hyphens: Deliberately Not Counted Word's Way, Reported Instead
+
+In a folder of scripts that had been lightly typeset (font changes, a header and page numbers, inserted images), 3 of 12 files were off from Word by one: 白未染 A/B were each one short on "characters with spaces", and 慕歸 A was one over on words, characters, characters with spaces, and CJK characters. Fonts, headers, page numbers and images were all ruled out (headers and footers are never counted; images carry no text). Scanning the whole folder showed the deviations equal, exactly, the number of two kinds of marks; recounting with an experimental copy that handles those two marks Word's way matched Word on all 12 files.
+
+- **Manual line break** (Shift+Enter, shown as ↵ with Word's editing marks on; in XML a `<w:br/>` with no type, or `<w:cr/>`): Word charges it **one whitespace character**, counted only in "characters with spaces", and it breaks a word run. The tool's original rule, "a line break isn't a character at all", had actually been measured on **page breaks** and then wrongly generalized to every kind of break. Page and column breaks really are not counted by Word; that part stands.
+- **Optional hyphen** (Ctrl+-, shown as ¬; in XML `<w:softHyphen/>`): Word **ignores it entirely** and it doesn't break a word run. The tool treated it as the character U+00AD, which is ambiguous width, so inside an East-Asian-formatted run it became one CJK character — hence all four statistics one over. Note that a literal U+00AD typed into the text itself *is* counted by Word; the element and the character behave differently.
+
+**Decision: leave the counting alone and point these out instead.** In these scripts both marks are typesetting mistakes — paragraphs should always use Enter, and an optional hyphen is normally invisible to the eye — so the thing to fix is the document, not the count. The GUI gains a section listing every occurrence: file, kind, paragraph number, and surrounding text (marked with Word's own editing-mark glyphs ↵, ¬, ¶), so they can be fixed back in Word. The cost: for a file containing these marks, the tool's numbers differ from Word's by exactly those characters, on purpose. Detection is a separate `find_hidden_marks()` that doesn't touch the counting functions; every count across the 12 files is identical before and after the feature was added.
+
+**When to switch back to matching Word:** if the tool starts being used on documents where Shift+Enter / Ctrl+- are intentional (someone else's formatting habits), adjust `_paragraph_segments()` to count them Word's way (a line break as one whitespace character, an optional hyphen as nothing), and keep the report as an option.
+
+The measurements also cleared up a contradiction along the way: in a hand-built test document, Word counted a page break as one character and one word, yet in real files it doesn't. The test document had no `settings.xml`, so Word opened it in Word 2007 compatibility mode; the real files are in Word 2010 mode. **Hand-built test documents need the same compatibility mode as the real files**, or a measured rule may only hold for the test document.
+
 ### Three GUI Design Choices That Only Settled After Two Rounds of User Feedback
 
 The GUI's earliest version applied Consolas across the whole table and quote box, originally just to make the bold "total row" visually consistent with the large Consolas total-word-count label next to it. The user's feedback was direct: Consolas itself is hard to read, and spreading it further only made the problem more visible. The final version drops every custom font family entirely — including `Consolas`/`Microsoft JhengHei UI`, which had been there from the very first version and were never individually called out, but were evidently part of the same problem. The one thing that stays bold — the "total" row — now derives its font from whatever the actual default font is via `tkinter.font`, layering on `bold`, rather than naming a typeface of its own; nothing can silently reintroduce a second font family this way.
@@ -255,6 +290,7 @@ gui/
 - **`--include-notes` / `--include-boxes` have only been verified against one synthetic test document**, with no real-file coverage.
 - Hidden text only recognizes direct formatting (`<w:vanish/>`), not hiding inherited through a style.
 - Only `.docx`/`.dotx` (OOXML) is supported; the legacy binary `.doc` format is not.
+- **Files containing manual line breaks or optional hyphens give numbers that differ from Word's (on purpose)**: each manual line break makes "characters with spaces" one short; each optional hyphen adds one character, and inside East-Asian-formatted text also one word and one CJK character. The GUI lists every occurrence — see "Manual Line Breaks and Optional Hyphens" above.
 - The GUI has only one recorded end-to-end run where the user personally clicked through the whole flow (pick folder → see results → copy) and confirmed the screen was correct; every round of changes since has only been verified at the pure-function and packaged-archive-contents level, without repeating a full interactive pass.
 
 ---
@@ -301,6 +337,14 @@ python -m PyInstaller --onefile --windowed --clean --name ScriptWordCount --path
 ```
 
 Output lands at `gui/dist/ScriptWordCount.exe` — a single file, no install, no network, safe to copy straight to another machine. Build artifacts (`build/`, `dist/`, `*.spec`) are gitignored.
+
+### 3. The Screen
+
+After picking a folder (counts every `.docx` at its first level, not subfolders) or a single file, three sections stack top to bottom; the dividers between them can be dragged to resize:
+
+1. **Count table**: each file's words, characters (without/with spaces), CJK characters and paragraphs, with a total row last. Select rows and press Ctrl+C to copy.
+2. **Manual line breaks / optional hyphens**: every occurrence's file, kind, paragraph number and surrounding text, with the total count in the section title. In the surrounding text, ↵ is a manual line break, ¬ an optional hyphen, and ¶ means that spot ends the paragraph; copy the text into Word's Ctrl+F to jump to it. To find every optional hyphen in Word at once, use Find and Replace → More → Special → Optional Hyphen (`^-`).
+3. **Quote text**: generated from each file's "characters with spaces"; editing the rate field recalculates it immediately.
 
 ## Part C. Cross-Validation
 

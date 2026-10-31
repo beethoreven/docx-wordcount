@@ -4,12 +4,12 @@ wordcount_gui.py - a one-window desktop app around docx_wordcount.py.
 
 Pick a single .docx to count it, or a folder to count every .docx one level
 inside it (not recursive). Results show in a selectable, copyable table on
-top; the bottom half auto-fills with a ready-to-paste quote block using each
-file's "字元(含空白)" count, once the top half's count finishes.
+top; below it, every manual line break / optional hyphen found is listed with
+its surrounding text; the bottom pane auto-fills with a ready-to-paste quote
+block using each file's "字元(含空白)" count, once counting finishes.
 
-Reuses docx_wordcount.py's counting logic unchanged (that module already
-matches Word's own ComputeStatistics() exactly - see this repo's README);
-this file is presentation only, no counting logic of its own.
+Reuses docx_wordcount.py's counting and mark-finding logic unchanged; this
+file is presentation only, no counting logic of its own.
 """
 import os
 import re
@@ -20,7 +20,7 @@ import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + r"\..")
-from docx_wordcount import count_docx  # noqa: E402
+from docx_wordcount import count_docx, find_hidden_marks, mark_glyph  # noqa: E402
 
 COLUMNS = (
     ("file", "檔案", 260),
@@ -99,8 +99,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("劇本字數統計")
-        self.geometry("900x760")
-        self.minsize(700, 560)
+        self.geometry("900x880")
+        self.minsize(700, 640)
 
         self._rows = []          # (path, result_dict_or_None, error_or_None)
         self._buttons = []       # every ttk.Button, so busy-lock can find them regardless of nesting
@@ -167,6 +167,29 @@ class App(tk.Tk):
         self.tree.tag_configure("total", font=bold_font)
         self.tree.bind("<Control-c>", self._copy_selection)
 
+        marks_pane = ttk.Frame(paned)
+        paned.add(marks_pane, weight=1)
+
+        self.marks_var = tk.StringVar(value="手動換行／選擇性連字號")
+        ttk.Label(marks_pane, textvariable=self.marks_var).pack(fill="x", pady=(8, 4))
+
+        mbody = ttk.Frame(marks_pane)
+        mbody.pack(fill="both", expand=True)
+        self.mark_tree = ttk.Treeview(mbody, columns=("file", "kind", "para", "context"),
+                                      show="headings", selectmode="extended", height=4)
+        for key, label, width, stretch in (("file", "檔案", 200, False),
+                                           ("kind", "類型", 100, False),
+                                           ("para", "段落", 60, False),
+                                           ("context", "前後文", 400, True)):
+            self.mark_tree.heading(key, text=label)
+            self.mark_tree.column(key, width=width, stretch=stretch,
+                                  anchor="e" if key == "para" else "w")
+        msb = ttk.Scrollbar(mbody, orient="vertical", command=self.mark_tree.yview)
+        self.mark_tree.configure(yscrollcommand=msb.set)
+        self.mark_tree.pack(side="left", fill="both", expand=True)
+        msb.pack(side="right", fill="y")
+        self.mark_tree.bind("<Control-c>", self._copy_selection)
+
         quote_pane = ttk.Frame(paned)
         paned.add(quote_pane, weight=2)
 
@@ -202,6 +225,7 @@ class App(tk.Tk):
         if not files:
             self.status_var.set("這個資料夾第一層沒有找到 .docx 檔案：%s" % folder)
             self._render([], [])
+            self._render_marks([])
             self._refresh_quote()
             return
         self.status_var.set("資料夾：%s" % folder)
@@ -223,18 +247,25 @@ class App(tk.Tk):
 
     def _count_worker(self, files):
         rows = []
+        marks = []               # (path, kind, paragraph_no, before, after)
         for f in files:
             try:
                 r = count_docx(f)
                 rows.append((f, r, None))
             except Exception as exc:  # noqa: BLE001 - surface any failure per file
                 rows.append((f, None, str(exc)))
-        self.after(0, lambda: self._finish(rows))
+                continue
+            try:
+                marks.extend((f,) + m for m in find_hidden_marks(f))
+            except Exception as exc:  # noqa: BLE001 - keep the count, but don't pass as "none found"
+                marks.append((f, None, None, "掃描失敗：" + str(exc), ""))
+        self.after(0, lambda: self._finish(rows, marks))
 
-    def _finish(self, rows):
+    def _finish(self, rows, marks):
         ok = [r for _, r, err in rows if err is None for r in [r]]
         bad = sum(1 for _, _, err in rows if err is not None)
         self._render(rows, ok)
+        self._render_marks(marks)
         self._refresh_quote()
         self._set_busy(False)
         msg = "完成，共 %d 個檔案" % len(rows)
@@ -279,6 +310,21 @@ class App(tk.Tk):
 
         self.total_var.set(format(total["words"], ","))
         self._total_raw = total["words"]
+
+    def _render_marks(self, marks):
+        self.mark_tree.delete(*self.mark_tree.get_children())
+        found = 0
+        for path, kind, para, before, after in marks:
+            name = os.path.basename(path)
+            if kind is None:
+                self.mark_tree.insert("", "end", values=(name, "", "", before), tags=("error",))
+                continue
+            found += 1
+            # Word's own editing-mark glyphs: ↵ / ¬ for the mark, ¶ where the paragraph ends
+            context = "%s【%s】%s" % (before, mark_glyph(kind), after if after else "¶")
+            self.mark_tree.insert("", "end", values=(name, kind, para, context))
+        self.mark_tree.tag_configure("error", foreground="#B00020")
+        self.marks_var.set("手動換行／選擇性連字號：%d 處" % found)
 
     def _refresh_quote(self):
         entries = [(os.path.splitext(os.path.basename(p))[0], r["chars_ws"])
@@ -335,11 +381,12 @@ class App(tk.Tk):
         self._to_clipboard(text)
         self.status_var.set("已複製報價文字")
 
-    def _copy_selection(self, _event=None):
-        sel = self.tree.selection()
+    def _copy_selection(self, event=None):
+        tree = event.widget if event is not None else self.tree
+        sel = tree.selection()
         if not sel:
             return
-        lines = ["\t".join(str(v) for v in self.tree.item(i, "values")) for i in sel]
+        lines = ["\t".join(str(v) for v in tree.item(i, "values")) for i in sel]
         self._to_clipboard("\n".join(lines))
         self.status_var.set("已複製選取的 %d 列" % len(sel))
 
